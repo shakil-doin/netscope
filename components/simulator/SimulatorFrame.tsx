@@ -1,8 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { AlertTriangle, ExternalLink, RefreshCw, Monitor } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import {
+  ArrowLeft,
+  ArrowRight,
+  RotateCcw,
+  X,
+  Lock,
+  Globe,
+  ExternalLink,
+  AlertTriangle,
+  Plus,
+} from "lucide-react";
 import { useNetScopeStore } from "@/store/useNetScopeStore";
 import { useRouteTracker } from "@/hooks/useRouteTracker";
 import { nanoid } from "@/lib/utils";
@@ -16,40 +25,50 @@ interface SimulatorFrameProps {
   url: string;
 }
 
-/**
- * Returns the URL to load in the iframe.
- * Cross-origin targets are routed through /api/proxy so the tracker script
- * can be auto-injected server-side — no user setup required.
- */
 function getIframeSrc(target: string): string {
-  if (typeof window === "undefined") return target;
+  if (typeof window === "undefined") return "";
   try {
     if (new URL(target).origin !== window.location.origin) {
       return `/api/proxy?url=${encodeURIComponent(target)}`;
     }
   } catch {
-    /* invalid URL — let it fall through */
+    /* invalid URL */
   }
   return target;
+}
+
+function getFaviconUrl(siteUrl: string): string {
+  try {
+    const { hostname } = new URL(siteUrl);
+    return `https://www.google.com/s2/favicons?domain=${hostname}&sz=32`;
+  } catch {
+    return "";
+  }
 }
 
 export function SimulatorFrame({ url }: SimulatorFrameProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [loading, setLoading] = useState(true);
-  // Ref so handleLoad (stale closure) can read the current proxy state.
-  const isProxiedRef = useRef(false);
+  const [displayUrl, setDisplayUrl] = useState(url);
+  const [faviconError, setFaviconError] = useState(false);
 
-  // Compute the iframe src only on the client (after mount) to avoid the
-  // SSR→hydration mismatch that would cause the iframe to load twice:
-  // once with the direct URL (from SSR HTML), once with the proxy URL.
-  // Starting with "" means the iframe renders without a src on the server
-  // and the real src is set on the first client-side effect.
+  const isProxiedRef = useRef(false);
+  const srcUrlRef = useRef("");
+  const urlRef = useRef(url);
+
   const [srcUrl, setSrcUrl] = useState("");
+
   useEffect(() => {
+    urlRef.current = url;
+    setDisplayUrl(url);
+    setFaviconError(false);
+    setLoading(true);
     const s = getIframeSrc(url);
     isProxiedRef.current = s !== url;
+    srcUrlRef.current = s;
     setSrcUrl(s);
   }, [url]);
+
   const iframeBlocked = useNetScopeStore((s) => s.iframeBlocked);
   const setIframeBlocked = useNetScopeStore((s) => s.setIframeBlocked);
   const addRequest = useNetScopeStore((s) => s.addRequest);
@@ -58,8 +77,6 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
   const setPerformance = useNetScopeStore((s) => s.setPerformance);
   const { trackRouteChange } = useRouteTracker();
 
-  // Track currentRoute via a ref — updated by a passive store subscription so
-  // SimulatorFrame never re-renders just because a request was added.
   const currentRouteRef = useRef(
     useNetScopeStore.getState().session?.currentRoute ?? "/",
   );
@@ -69,7 +86,6 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
     });
   }, []);
 
-  // Pending requests map for the iframe messages
   const pendingRef = useRef<
     Map<string, { entry: RequestEntry; startTime: number }>
   >(new Map());
@@ -136,6 +152,12 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
         },
         onRouteChange: (path) => {
           trackRouteChange(path);
+          try {
+            const base = new URL(urlRef.current);
+            setDisplayUrl(`${base.origin}${path}`);
+          } catch {
+            setDisplayUrl(urlRef.current);
+          }
         },
         onError: (data) => {
           const errEntry: ErrorEntry = {
@@ -152,7 +174,6 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
           };
           addError(errEntry);
         },
-        // Real performance data from same-origin iframes via tracker script
         onPerformance: (data) => {
           setPerformance({
             ttfb: data.ttfb,
@@ -171,7 +192,6 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
         },
       });
     },
-    // currentRouteRef is a ref — not a dep. trackRouteChange is now stable.
     [addRequest, updateRequest, addError, trackRouteChange, setPerformance],
   );
 
@@ -180,26 +200,21 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
     return () => window.removeEventListener("message", handleIframeMessage);
   }, [handleIframeMessage]);
 
-  // Counts how many times the iframe has loaded. Used to distinguish the
-  // initial load (probe already fired by mount effect) from navigations.
   const loadCountRef = useRef(0);
 
   const handleLoad = () => {
+    if (!srcUrlRef.current) return; // ignore about:blank from empty initial src
+
     setLoading(false);
     setIframeBlocked(false);
     loadCountRef.current += 1;
     const isFirstLoad = loadCountRef.current === 1;
 
-    // ── Path detection ─────────────────────────────────────────────────────
-    // Proxy mode: iframe is same-origin (localhost:3000/api/proxy?url=...).
-    // contentWindow.location.pathname is "/api/proxy", not the real path.
-    // For initial load derive from the original URL; SPA navigations are
-    // covered by route_change postMessages from the injected tracker script.
     let detectedPath: string | null = null;
     if (isProxiedRef.current) {
       if (isFirstLoad) {
         try {
-          detectedPath = new URL(url).pathname || "/";
+          detectedPath = new URL(urlRef.current).pathname || "/";
         } catch {
           /* noop */
         }
@@ -211,7 +226,7 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
       } catch {
         if (isFirstLoad) {
           try {
-            detectedPath = new URL(url).pathname || "/";
+            detectedPath = new URL(urlRef.current).pathname || "/";
           } catch {
             /* noop */
           }
@@ -224,13 +239,10 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
       trackRouteChange(detectedPath);
     }
 
-    // Fire probe fetch for subsequent loads (initial probe fired by mount effect).
     if (!isFirstLoad) {
-      fetch(url, { mode: "no-cors" }).catch(() => {});
+      fetch(urlRef.current, { mode: "no-cors" }).catch(() => {});
     }
 
-    // Inject tracker for non-proxied same-origin iframes.
-    // Proxied iframes already have the tracker injected server-side.
     if (!isProxiedRef.current) {
       try {
         const win = iframeRef.current?.contentWindow;
@@ -240,119 +252,204 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
           (win.document.head ?? win.document.body)?.appendChild(script);
         }
       } catch {
-        // Cross-origin — should not happen since cross-origin URLs are proxied.
+        /* cross-origin — proxied sites won't reach here */
       }
     }
   };
 
-  const handleError = () => {
-    setLoading(false);
-    setIframeBlocked(true);
-  };
-
-  // Detect X-Frame-Options blocking via timeout (no JS error is fired for CSP/XFO)
+  // Timeout guard for non-proxied same-origin sites only.
+  // Proxied sites can't be blocked by X-Frame-Options (headers stripped server-side).
   useEffect(() => {
-    const timer = setTimeout(() => {
+    if (isProxiedRef.current) return;
+    if (!loading) return;
+    const t = setTimeout(() => {
       if (loading) {
         setLoading(false);
         setIframeBlocked(true);
       }
-    }, 10000);
-    return () => clearTimeout(timer);
+    }, 10_000);
+    return () => clearTimeout(t);
   }, [loading, setIframeBlocked]);
 
-  const reload = () => {
+  const reload = useCallback(() => {
+    loadCountRef.current = 0;
     setLoading(true);
     setIframeBlocked(false);
+    setDisplayUrl(urlRef.current);
     if (iframeRef.current) {
-      iframeRef.current.src = srcUrl;
+      iframeRef.current.src = srcUrlRef.current;
     }
-  };
+  }, [setIframeBlocked]);
 
-  if (iframeBlocked) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full bg-zinc-950 gap-4 px-6 text-center">
-        <div className="h-14 w-14 rounded-full bg-yellow-950 border border-yellow-800 flex items-center justify-center">
-          <AlertTriangle className="h-7 w-7 text-yellow-400" />
-        </div>
-        <div>
-          <h3 className="text-zinc-100 font-semibold text-lg">
-            Site cannot be embedded
-          </h3>
-          <p className="text-zinc-400 text-sm mt-2 max-w-md">
-            This website uses{" "}
-            <code className="bg-zinc-800 px-1 rounded">X-Frame-Options</code> or{" "}
-            <code className="bg-zinc-800 px-1 rounded">
-              Content-Security-Policy: frame-ancestors
-            </code>{" "}
-            headers that prevent embedding in an iframe.
-          </p>
-          <p className="text-zinc-500 text-sm mt-3 max-w-md">
-            NetScope can still track requests from the dashboard if you open the
-            site separately and send events manually, but live embedding is
-            blocked by the target server.
-          </p>
-        </div>
-        <div className="flex gap-3 mt-2">
-          <Button variant="outline" size="sm" onClick={reload}>
-            <RefreshCw className="h-3.5 w-3.5" />
-            Retry
-          </Button>
-          <Button variant="outline" size="sm" asChild>
-            <a href={url} target="_blank" rel="noopener noreferrer">
-              <ExternalLink className="h-3.5 w-3.5" />
-              Open in new tab
-            </a>
-          </Button>
-        </div>
-      </div>
-    );
-  }
+  const goBack = useCallback(() => {
+    try {
+      iframeRef.current?.contentWindow?.history.back();
+    } catch {
+      /* cross-origin guard */
+    }
+  }, []);
+
+  const goForward = useCallback(() => {
+    try {
+      iframeRef.current?.contentWindow?.history.forward();
+    } catch {
+      /* cross-origin guard */
+    }
+  }, []);
+
+  const isHttps = (() => {
+    try {
+      return new URL(displayUrl).protocol === "https:";
+    } catch {
+      return false;
+    }
+  })();
+
+  const faviconUrl = getFaviconUrl(url);
+
+  const tabTitle = (() => {
+    try {
+      const u = new URL(displayUrl);
+      return u.hostname + (u.pathname !== "/" ? u.pathname : "");
+    } catch {
+      return url;
+    }
+  })();
 
   return (
-    <div className="relative w-full h-full bg-zinc-950 flex flex-col">
-      {/* Status bar */}
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 border-b border-zinc-800 text-xs text-zinc-400 shrink-0">
-        <Monitor className="h-3 w-3 text-zinc-500" />
-        <span className="text-zinc-500">Simulating:</span>
-        <span className="text-zinc-300 font-mono truncate max-w-xs">{url}</span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-5 w-5 ml-auto"
-          onClick={reload}
+    <div className="w-full h-full flex flex-col overflow-hidden bg-[#1c1c1e]">
+      {/* ── Browser Tab Bar ──────────────────────────────────────────────── */}
+      <div className="flex items-end bg-[#28282a] border-b border-[#3a3a3c] pl-3 pr-2 pt-2 shrink-0 select-none">
+        {/* macOS traffic lights */}
+        <div className="flex items-center gap-1.5 mb-[7px] mr-3 shrink-0">
+          <span className="h-[11px] w-[11px] rounded-full bg-[#ff5f57] border border-[#e0443e]/40" />
+          <span className="h-[11px] w-[11px] rounded-full bg-[#ffbd2e] border border-[#dea123]/40" />
+          <span className="h-[11px] w-[11px] rounded-full bg-[#28c840] border border-[#1aab2e]/40" />
+        </div>
+
+        {/* Active tab */}
+        <div className="relative flex items-center gap-1.5 bg-[#1c1c1e] border border-[#48484a] border-b-[#1c1c1e] rounded-t-[8px] px-3 h-[30px] max-w-[220px] min-w-0 cursor-default">
+          {!faviconError && faviconUrl ? (
+            <img
+              src={faviconUrl}
+              alt=""
+              className="h-[14px] w-[14px] shrink-0 rounded-[2px]"
+              onError={() => setFaviconError(true)}
+            />
+          ) : (
+            <Globe className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+          )}
+          <span className="text-[11px] text-zinc-300 truncate flex-1 leading-none">
+            {tabTitle}
+          </span>
+          <X className="h-3 w-3 text-zinc-600 hover:text-zinc-400 shrink-0 ml-0.5 transition-colors" />
+        </div>
+
+        {/* New tab button */}
+        <div className="flex items-center justify-center h-[26px] w-[26px] mb-[2px] ml-1.5 rounded-md hover:bg-zinc-700/50 cursor-pointer transition-colors">
+          <Plus className="h-3.5 w-3.5 text-zinc-600" />
+        </div>
+      </div>
+
+      {/* ── Address Bar ──────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-0.5 px-2 py-1.5 bg-[#1c1c1e] border-b border-[#3a3a3c] shrink-0">
+        <button
+          onClick={goBack}
+          className="flex items-center justify-center h-7 w-7 rounded-full text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors"
         >
-          <RefreshCw className="h-3 w-3" />
-        </Button>
-        <a href={url} target="_blank" rel="noopener noreferrer">
-          <Button variant="ghost" size="icon" className="h-5 w-5">
-            <ExternalLink className="h-3 w-3" />
-          </Button>
+          <ArrowLeft className="h-3.5 w-3.5" />
+        </button>
+        <button
+          onClick={goForward}
+          className="flex items-center justify-center h-7 w-7 rounded-full text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors"
+        >
+          <ArrowRight className="h-3.5 w-3.5" />
+        </button>
+        <button
+          onClick={reload}
+          className="flex items-center justify-center h-7 w-7 rounded-full text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors"
+        >
+          <RotateCcw
+            className={`h-3.5 w-3.5 transition-transform ${loading ? "animate-spin" : ""}`}
+          />
+        </button>
+
+        {/* URL bar */}
+        <div className="flex-1 flex items-center gap-2 bg-[#2c2c2e] border border-[#48484a] hover:border-[#636366] rounded-full px-3 h-7 mx-1.5 cursor-text transition-colors">
+          {isHttps ? (
+            <Lock className="h-3 w-3 text-green-500/80 shrink-0" />
+          ) : (
+            <Globe className="h-3 w-3 text-zinc-500 shrink-0" />
+          )}
+          <span className="flex-1 text-[12px] font-mono text-zinc-200 truncate leading-none select-all">
+            {displayUrl}
+          </span>
+        </div>
+
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center justify-center h-7 w-7 rounded-full text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700/50 transition-colors"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
         </a>
       </div>
 
-      {/* No cross-origin banner — cross-origin sites are transparently proxied
-           through /api/proxy which auto-injects the tracker server-side. */}
-
+      {/* Loading progress bar */}
       {loading && (
-        <div className="absolute inset-0 top-8 flex items-center justify-center bg-zinc-950 z-10">
-          <div className="flex flex-col items-center gap-3">
-            <div className="h-8 w-8 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
-            <p className="text-xs text-zinc-400">Loading {url}…</p>
-          </div>
+        <div className="h-[2px] shrink-0 bg-[#2c2c2e] overflow-hidden relative">
+          <div
+            className="absolute inset-y-0 w-[40%] bg-blue-500 rounded-full"
+            style={{ animation: "ns-loading-bar 1.3s ease-in-out infinite" }}
+          />
         </div>
       )}
 
-      <iframe
-        ref={iframeRef}
-        src={srcUrl}
-        className="flex-1 border-0 min-h-0"
-        tabIndex={-1}
-        onLoad={handleLoad}
-        onError={handleError}
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation"
-        title="NetScope Simulator"
-      />
+      {/* Blocked state */}
+      {iframeBlocked ? (
+        <div className="flex-1 flex flex-col items-center justify-center bg-[#1c1c1e] gap-5 px-6 text-center">
+          <div className="h-14 w-14 rounded-full bg-zinc-900 border border-zinc-700 flex items-center justify-center">
+            <AlertTriangle className="h-7 w-7 text-yellow-400" />
+          </div>
+          <div>
+            <h3 className="text-zinc-100 font-semibold text-base">
+              This site can&apos;t be embedded
+            </h3>
+            <p className="text-zinc-500 text-sm mt-1.5 max-w-sm">
+              The server refused to load even through the proxy.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={reload}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
+            >
+              <RotateCcw className="h-3 w-3" />
+              Retry
+            </button>
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-zinc-700 text-zinc-300 hover:bg-zinc-800 transition-colors"
+            >
+              <ExternalLink className="h-3 w-3" />
+              Open in new tab
+            </a>
+          </div>
+        </div>
+      ) : (
+        <iframe
+          ref={iframeRef}
+          src={srcUrl}
+          className="flex-1 border-0 min-h-0 bg-white"
+          tabIndex={-1}
+          onLoad={handleLoad}
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation"
+          title="NetScope Simulator"
+        />
+      )}
     </div>
   );
 }
