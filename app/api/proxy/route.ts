@@ -92,13 +92,58 @@ XMLHttpRequest.prototype.send=function(b){
   self.addEventListener('error',function(){if(!_skip(self.__ns_u))_msg('request_error',{id:self.__ns_id,message:'XHR error',duration:performance.now()-self.__ns_t,timestamp:Date.now()});});
   return _oS.apply(this,arguments);
 };
-// Route tracking
-var _lp=location.pathname;
-var _cr=function(){if(location.pathname!==_lp){_lp=location.pathname;_msg('route_change',{path:_lp,timestamp:Date.now()});}};
+// Route tracking for proxied pages
+var _basePath=function(){
+  try{
+    var raw=new URLSearchParams(location.search).get('url');
+    if(raw){
+      var u=new URL(raw);
+      return u.pathname||'/';
+    }
+  }catch(e){}
+  return '/';
+};
+var _toTargetURL=function(u){
+  if(u==null||u==='')return null;
+  try{
+    return new URL(String(u),_o+_lp);
+  }catch(e){
+    return null;
+  }
+};
+var _toProxyHistoryURL=function(u){
+  return _ns+'/api/proxy?url='+encodeURIComponent(u.href);
+};
+var _toPath=function(u){
+  var t=_toTargetURL(u);
+  return t?(t.pathname||'/'):null;
+};
+var _lp=_basePath();
+// Emit current route once on each document load so full navigations
+// (non-SPA links) are counted as page visits.
+_msg('route_change',{path:_lp,timestamp:Date.now()});
+var _cr=function(next){
+  var p=_toPath(next)||_basePath();
+  if(p!==_lp){_lp=p;_msg('route_change',{path:_lp,timestamp:Date.now()});}
+};
 var _oPS=history.pushState,_oRS=history.replaceState;
-history.pushState=function(){_oPS.apply(this,arguments);_cr();};
-history.replaceState=function(){_oRS.apply(this,arguments);_cr();};
-window.addEventListener('popstate',_cr);
+history.pushState=function(state,title,url){
+  var nextPath=_toPath(url);
+  var proxied=url;
+  var target=_toTargetURL(url);
+  if(target)proxied=_toProxyHistoryURL(target);
+  _oPS.call(this,state,title,proxied);
+  _cr(nextPath);
+};
+history.replaceState=function(state,title,url){
+  var nextPath=_toPath(url);
+  var proxied=url;
+  var target=_toTargetURL(url);
+  if(target)proxied=_toProxyHistoryURL(target);
+  _oRS.call(this,state,title,proxied);
+  _cr(nextPath);
+};
+window.addEventListener('popstate',function(){_cr(null);});
 // Performance
 var _pm={};
 var _sp=function(){var nav=performance.getEntriesByType&&performance.getEntriesByType('navigation')[0];var res=(performance.getEntriesByType&&performance.getEntriesByType('resource'))||[];var js=0,css=0,img=0,tot=0;for(var i=0;i<res.length;i++){var s=res[i].transferSize||0;tot+=s;if(res[i].initiatorType==='script')js+=s;else if(res[i].initiatorType==='css'||res[i].initiatorType==='link')css+=s;else if(res[i].initiatorType==='img')img+=s;}_msg('performance',{ttfb:nav?nav.responseStart-nav.requestStart:(_pm.ttfb||null),fcp:_pm.fcp||null,lcp:_pm.lcp||null,cls:_pm.cls||null,inp:_pm.inp||null,domContentLoaded:nav?nav.domContentLoadedEventEnd-nav.startTime:null,loadComplete:nav?nav.loadEventEnd-nav.startTime:null,resourceCount:res.length,jsSize:js,cssSize:css,imageSize:img,totalSize:tot});};

@@ -212,9 +212,23 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
 
     let detectedPath: string | null = null;
     if (isProxiedRef.current) {
-      if (isFirstLoad) {
+      try {
+        const win = iframeRef.current?.contentWindow;
+        const href = win?.location.href;
+        if (href) {
+          const proxied = new URL(href);
+          const rawTarget = proxied.searchParams.get("url");
+          if (rawTarget) {
+            const target = new URL(rawTarget);
+            detectedPath = target.pathname || "/";
+            setDisplayUrl(target.href);
+          }
+        }
+      } catch {
         try {
-          detectedPath = new URL(urlRef.current).pathname || "/";
+          const fallback = new URL(urlRef.current);
+          detectedPath = fallback.pathname || "/";
+          setDisplayUrl(fallback.href);
         } catch {
           /* noop */
         }
@@ -439,7 +453,7 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
             </a>
           </div>
         </div>
-      ) : (
+      ) : srcUrl ? (
         <iframe
           ref={iframeRef}
           src={srcUrl}
@@ -449,6 +463,8 @@ export function SimulatorFrame({ url }: SimulatorFrameProps) {
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation"
           title="NetScope Simulator"
         />
+      ) : (
+        <div className="flex-1 min-h-0 bg-white" />
       )}
     </div>
   );
